@@ -244,12 +244,34 @@ capability word 0x34000222 leaves out `CAPAB_DRIVE_1541_2` (itu.h:51). Drive B i
 - **Firmware limits do not explain it.**
   - `MAX_HTTP_CLIENT` is 5, with `listen(sock, 5)` (httpd/FreeRTOS/lib/server.h:14, server.c:65).
   - `DEFAULT_ACCEPTMBOX_SIZE` is 8 and `MEMP_NUM_TCP_PCB` is 30 (network/config/lwipopts.h:203,937).
-- **Root cause: not isolated.** Two unverified candidates:
-  - frames that arrive as one burst per pump slice, where the RMII model drops a frame when no free buffer ID is
+- **Does not reproduce on Linux.** The table above was measured on macOS against a firmware built from the
+  1541ultimate tree. `run/e5/hammer.py` is the same measurement as a standalone script (N threads, `GET /v1/info`,
+  `Connection: close`, no stagger unless asked); on Ubuntu 26.04 under WSL2 with libslirp 4.9.1, against the
+  released 3.15a application from `update_v3.15a.ue2`, it finds **no resets at all** in any configuration tried:
+
+  | Speed | Forwards | Clients x requests | Result |
+  |---|---|---|---|
+  | realtime | 1 | 1x30, 2x15, 3x10 | all 200, and 3 clients staggered 100 ms and 300 ms likewise |
+  | realtime | 1 | 3x10, 5x10, 8x10, 16x10 | all 200 (350 requests) |
+  | max | 1 | 3x20, 8x20, 16x20 | all 200 (540 requests) |
+  | realtime | 2004 | 1x10, 3x10, 8x10 | all 200 |
+
+  The last row rules out a third candidate this section did not list: that the ~2000 passive-FTP forwards
+  `run-e2e.sh` installs make each `slirp_pollfds_fill` walk enough sockets to starve the guest. They cost
+  wall-clock time (8 clients take 3.2 s against 2.2 s with one forward) and no resets.
+- **Root cause: still not isolated, but the candidates have moved.** The two originally listed were:
+  - frames arriving as one burst per pump slice, where the RMII model drops a frame when no free buffer ID is
     queued (rmii.rs:170);
   - libslirp's handling of a guest that accepts slowly.
 
-  A packet capture on the slirp side would decide between them.
+  `rmii.rs` is host-independent Rust, so if the first were the whole story it should reproduce on Linux under the
+  heavier load above, and it does not - which makes it unlikely rather than excluded, since a differently built
+  firmware could refill the free queue at a different rate. The libslirp candidate is likewise not supported by
+  4.9.1 on Linux. What is left uncontrolled is the pair the Linux run could not hold fixed: the **macOS host** and
+  the **dev firmware build**. Repeating `hammer.py` on macOS against the released .ue2 separates those two in one
+  measurement, and is the next step rather than the packet capture this section used to recommend.
+  `receive()` drops silently, so an RX-drop counter on the RMII model would settle the first candidate outright
+  whichever host it runs on.
 - **Unrelated.** The console lines `ERROR reading from socket -1. Errno = 104` belong to the Telnet UI session
   (`User Interface on stream returned`). The health sweep's Telnet probe connects and closes at once, which is the
   reset they report.
