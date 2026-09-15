@@ -44,8 +44,25 @@ scripts/smoke-all.sh                                      # release build, every
 - **Linux:** builds and passes the tests in CI on Ubuntu 24.04, not used interactively yet. It needs the libslirp
   development package, version 4.7 or newer (Debian 12, Ubuntu 24.04). `--net vmnet-bridged` is macOS only.
   `ue2-mcp` stops an emulator through `nc`; without `nc` the stop falls back to SIGTERM after about 3 seconds.
-- **Windows:** not supported. Besides libslirp, the code uses Unix APIs in `ue2-vfat` (`--usb-dir`), `ue2-mcp`
-  (instance control), `ue2-net` and `crates/ue2emu/src/c64roms.rs`.
+- **Windows:** not supported natively. Besides libslirp, the code uses Unix APIs in `ue2-vfat` (`--usb-dir`),
+  `ue2-mcp` (instance control), `ue2-net` and `crates/ue2emu/src/c64roms.rs`.
+- **Windows through WSL2:** works, and is the supported way to run on Windows. Verified on Ubuntu 26.04
+  (WSL 2.7.12, kernel 6.18) with rustc 1.98.1 and libslirp 4.9.1: the firmware boots, the C64 reaches
+  BASIC `READY.`, `install` runs the updater, `--net user` works, and `scripts/mcp-smoke.py` passes.
+  - Packages: `build-essential pkg-config libslirp-dev libasound2-dev`. Add `libasound2-plugins` for
+    sound and `libxkbcommon-x11-0` only if you force the X11 backend; `winit` picks Wayland by default
+    under WSLg and needs neither.
+  - Build with `CARGO_TARGET_DIR` on the WSL filesystem (e.g. `$HOME/ue2-target`) while the checkout
+    stays on `/mnt/c`: the sources remain editable from Windows and the build avoids the 9p filesystem.
+  - The window and audio work under WSLg. ALSA has no `default` PCM there, so audio needs
+    `/etc/asound.conf` with `pcm.!default { type pulse }` and `ctl.!default { type pulse }`; without it
+    the emulator prints `audio: no default output config` and runs on silently. `--audio-wav` is
+    unaffected.
+  - `--net user` binds 127.0.0.1 inside WSL, which WSL's localhost forwarding relays, so
+    `http://127.0.0.1:8080/` reaches the firmware web UI from a Windows browser unchanged.
+  - A checkout made by Windows git has CRLF line endings, which `scripts/*.sh` do not survive under
+    bash. The `.ctl` control scripts are unaffected: `control.rs` reads them with `str::lines`, which
+    strips the `\r`.
 
 ### TRX64 dependency
 
@@ -146,7 +163,7 @@ option.
 
 | Option | Meaning |
 |---|---|
-| `--sd IMAGE` | SD card image (`scripts/make-sd-image.sh`, `scripts/add-sd-files.sh`) |
+| `--sd IMAGE` | SD card image (`scripts/make-sd-image.py` anywhere, or `scripts/make-sd-image.sh` and `scripts/add-sd-files.sh` on macOS) |
 | `--usb IMAGE` | Raw disk image as a USB mass-storage device; repeatable; images take the hub ports first (`docs/status/usb.md`) |
 | `--usb-dir PATH[,size=SIZE][,ro]` | Host directory as a FAT32 USB stick, the guest's changes written back; repeatable, on the hub ports after the images (`docs/status/usb-dir.md`) |
 | `--usb-dir-work DIR` | Where `--usb-dir` keeps its volume images, manifests and snapshots; default `run/usb-dir` |

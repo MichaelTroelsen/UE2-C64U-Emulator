@@ -125,8 +125,12 @@ TEMP_USE_CACHE_SUBFOLDER = 1 (userinterface.h:36-46). The test
 - **`smoke-flash-1.ctl` expects a fresh flash** (at least one where Color Scheme is not already C128 Style).
   Otherwise no save popup appears, and its RETURN opens the browser's context menu instead; the flash still
   holds C128 Style, so run 2 still passes. Run the sequence from an empty `run/`.
-- **Image script needs DiskArbitration:** `make-sd-image.sh` needs `hdiutil`/`diskutil`, i.e. a normal macOS
-  login session. It has no mtools path.
+- **Image script needs DiskArbitration (resolved):** `make-sd-image.sh` needs `hdiutil`/`diskutil`, i.e. a
+  normal macOS login session. `scripts/make-sd-image.py` writes the same image anywhere: it generates the
+  same sample files and formats the volume with `ue2-mkimage`
+  (`crates/ue2-vfat/src/bin/ue2-mkimage.rs`), which calls the `ue2_vfat::image::build` that `--usb-dir`
+  already uses. `ue2-mkimage <image> <dir>` turns any directory into an image, which also covers
+  `add-sd-files.sh`.
 - **Flash write-back window:** the image is written about 0.5 s of wall time after a program/erase, and when
   the machine drops. Killing the process (Ctrl-C in headless mode, `kill`) inside that window loses the last
   save. `quit` and closing the window are safe.
