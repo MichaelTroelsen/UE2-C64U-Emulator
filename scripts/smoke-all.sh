@@ -6,14 +6,23 @@
 #
 # Firmware: $UE2_FIRMWARE (default: firmware/1541ultimate under the repo root) must hold
 # target/u64ii/riscv/ultimate/result/ultimate.elf and roms/. The run directory (logs, SD image, flash images,
-# PNGs) is removed after a pass and kept after a failure. scripts/make-sd-image.sh needs a macOS login session.
+# PNGs) is removed after a pass and kept after a failure. The SD image is built with
+# scripts/make-sd-image.py (portable: Linux, WSL, Windows, macOS); set UE2_SD_IMAGE_SCRIPT=sh to use
+# scripts/make-sd-image.sh instead, which needs a macOS login session.
 #
 # Runs, in order:
 #   menu        smoke-menu.ctl      --flash run/flash.bin (seeded on first use)
 #   sd          smoke-sd.ctl        --flash run/flash.bin --sd run/sd.img
 #   flash-1     smoke-flash-1.ctl   --flash run/flash-ui.bin (fresh: Color Scheme must not be C128 Style yet)
 #   flash-2     smoke-flash-2.ctl   --flash run/flash-ui.bin --no-overlay-ui
+#   usb         smoke-usb.ctl       --flash run/flash-usb.bin --usb run/usb.img --usb-keyboard
+#   c64-ready   smoke-c64-ready.ctl   --flash run/flash-c64-ready.bin --c64-roms
+#   c64-type    smoke-c64-type.ctl    --flash run/flash-c64-type.bin --c64-roms
+#   c64-prg     smoke-c64-prg.ctl     --flash run/flash-c64-prg.bin --c64-roms --sd run/sd.img
+#   c64-freeze  smoke-c64-freeze.ctl  --flash run/flash-c64-freeze.bin --c64-roms --no-overlay-ui
 #   negative    an expect that cannot match; passes only when ue2emu exits non-zero and names its line
+# Each of the five scripts above gets its own flash image and its own --control port (6401-6405), so no two
+# runs ever share one, even though smoke-all.sh runs them one at a time.
 
 set -euo pipefail
 
@@ -66,10 +75,33 @@ smoke() {
 }
 
 smoke menu "$repo/scripts/smoke-menu.ctl" --flash run/flash.bin
-"$repo/scripts/make-sd-image.sh" run/sd.img
+if [[ ${UE2_SD_IMAGE_SCRIPT:-py} == sh ]]; then
+    "$repo/scripts/make-sd-image.sh" run/sd.img
+else
+    # Through the interpreter, not the shebang: make-sd-image.py is mode 100644 in the index, so a clean
+    # checkout cannot execute it directly. make-sd-image.py runs ue2-mkimage with cwd=$repo, so the image
+    # path must be absolute here or it would land under $repo/run instead of this run directory's run/.
+    "${UE2_PYTHON:-python3}" "$repo/scripts/make-sd-image.py" "$PWD/run/sd.img"
+fi
 smoke sd "$repo/scripts/smoke-sd.ctl" --flash run/flash.bin --sd run/sd.img
 smoke flash-1 "$repo/scripts/smoke-flash-1.ctl" --flash run/flash-ui.bin
 smoke flash-2 "$repo/scripts/smoke-flash-2.ctl" --flash run/flash-ui.bin --no-overlay-ui
+
+if [[ ${UE2_SD_IMAGE_SCRIPT:-py} == sh ]]; then
+    "$repo/scripts/make-sd-image.sh" run/usb.img 48
+else
+    "${UE2_PYTHON:-python3}" "$repo/scripts/make-sd-image.py" "$PWD/run/usb.img" 48
+fi
+smoke usb "$repo/scripts/smoke-usb.ctl" --flash run/flash-usb.bin --usb run/usb.img --usb-keyboard \
+    --control 127.0.0.1:6401
+smoke c64-ready "$repo/scripts/smoke-c64-ready.ctl" --flash run/flash-c64-ready.bin --c64-roms \
+    --control 127.0.0.1:6402
+smoke c64-type "$repo/scripts/smoke-c64-type.ctl" --flash run/flash-c64-type.bin --c64-roms \
+    --control 127.0.0.1:6403
+smoke c64-prg "$repo/scripts/smoke-c64-prg.ctl" --flash run/flash-c64-prg.bin --c64-roms --sd run/sd.img \
+    --control 127.0.0.1:6404
+smoke c64-freeze "$repo/scripts/smoke-c64-freeze.ctl" --flash run/flash-c64-freeze.bin --c64-roms \
+    --no-overlay-ui --control 127.0.0.1:6405
 
 printf '# must fail\nexpect "NO SUCH TEXT ON THE SCREEN" 500\nquit\n' >run/negative.ctl
 rc=0
