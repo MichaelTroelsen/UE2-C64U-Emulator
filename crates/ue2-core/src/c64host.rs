@@ -57,7 +57,9 @@ pub trait C64Backend {
     fn dma_read(&mut self, addr: u16, mem_only: bool) -> u8;
     /// One DMA write (0x10050000 + addr).
     fn dma_write(&mut self, addr: u16, val: u8, mem_only: bool);
-    /// What a DMA read would return, without side effects (debugger).
+    /// What a DMA read would return, without side effects (debugger). Takes `&self`, so a peek cannot run the C64;
+    /// the cartridge serves its ROM and RAM windows here only while DDR is lent around the call
+    /// (`C64Port::dma_peek_ddr`, [`C64Backend::lend_ddr`]), and reads them as not served otherwise.
     fn dma_peek(&self, addr: u16) -> u8;
     fn rom_write(&mut self, rom: C64Rom, off: u16, val: u8);
     fn rom_read(&self, rom: C64Rom, off: u16) -> u8;
@@ -240,6 +242,7 @@ pub(crate) mod mock {
     use std::rc::Rc;
 
     use super::{C64Backend, C64Frame, C64Rom};
+    use crate::devices::c64::{CART_ROM_DDR, CART_ROM_SIZE};
 
     #[derive(Clone, Debug, PartialEq, Eq)]
     pub(crate) enum Call {
@@ -272,6 +275,9 @@ pub(crate) mod mock {
         pub(crate) core: Rc<RefCell<Vec<(u8, u8)>>>,
         /// Length of the DDR lent right now.
         pub(crate) ddr: Rc<RefCell<Option<usize>>>,
+        /// The cart ROM window of the DDR lent right now (W4-CART), `None` while no DDR is lent. A real backend
+        /// keeps the lease as a pointer; the mock copies the 16 K window so it stays safe code.
+        pub(crate) cart_rom: Rc<RefCell<Option<Vec<u8>>>>,
         /// The lent DDR length at each recorded call, in call order.
         pub(crate) leases: Rc<RefCell<Vec<Option<usize>>>>,
         /// What `cart_detect` returns; None is the trait default (CARTSLOT).
@@ -314,8 +320,14 @@ pub(crate) mod mock {
         fn dma_write(&mut self, addr: u16, val: u8, mem_only: bool) {
             self.push(Call::DmaWrite(addr, val, mem_only));
         }
+        /// Serves `$8000-$BFFF` out of the lent cart ROM (ROML then ROMH, as `CartLogic` does), so a peek shows the
+        /// CRT byte in DDR; without a lease those windows read as not served, like the rest of the bus.
         fn dma_peek(&self, addr: u16) -> u8 {
-            !(addr as u8)
+            let unserved = !(addr as u8);
+            match (&*self.cart_rom.borrow(), addr) {
+                (Some(rom), 0x8000..=0xBFFF) => rom.get(usize::from(addr - 0x8000)).copied().unwrap_or(unserved),
+                _ => unserved,
+            }
         }
         fn rom_write(&mut self, rom: C64Rom, off: u16, val: u8) {
             self.push(Call::RomWrite(rom, off, val));
@@ -355,7 +367,14 @@ pub(crate) mod mock {
             self.core.borrow_mut().push((off, val));
         }
         fn lend_ddr(&mut self, ddr: Option<&mut [u8]>) {
-            *self.ddr.borrow_mut() = ddr.map(|d| d.len());
+            let (len, rom) = match ddr {
+                Some(d) => {
+                    let rom = d.get(CART_ROM_DDR..CART_ROM_DDR + CART_ROM_SIZE).map(<[u8]>::to_vec);
+                    (Some(d.len()), rom)
+                }
+                None => (None, None),
+            };
+            (*self.ddr.borrow_mut(), *self.cart_rom.borrow_mut()) = (len, rom);
         }
         /// Returns the low offset byte xor 0xA5.
         fn eeprom_read(&self, off: u16) -> u8 {

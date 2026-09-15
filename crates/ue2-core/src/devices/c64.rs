@@ -104,8 +104,8 @@ const KILL_FORCE: u8 = 0x02;
 
 /// `__cart_rom_start` in DDR (linker.x:269-287): the ROM of the CART_TYPE_NORMAL family, 16 K
 /// (`set_cartridge` memcpy, c64.cc:1285-1288).
-const CART_ROM_DDR: usize = 0x03C0_0000;
-const CART_ROM_SIZE: usize = 0x4000;
+pub(crate) const CART_ROM_DDR: usize = 0x03C0_0000;
+pub(crate) const CART_ROM_SIZE: usize = 0x4000;
 
 /// C64 core config 0x10180000 (u64.h:104-154): RAM-like latches (10 H16), CORE_VERSION constant.
 const CORE_CONFIG: &[Span] = &[
@@ -306,8 +306,33 @@ impl C64Port {
     }
 
     /// What a DMA read of C64 address `addr` returns, without side effects (the backend's bus or the T0 stub).
+    ///
+    /// No DDR is lent here, so a cartridge reads its ROM, RAM and GeoRAM windows as not served. A caller that can
+    /// reach guest DDR should use [`Self::dma_peek_ddr`] instead.
     pub fn dma_peek(&self, addr: u16) -> u8 {
         self.peek8(DMA + u32::from(addr))
+    }
+
+    /// What a DMA read of C64 address `addr` returns, without side effects, with guest DDR lent for the peek alone
+    /// (W4-CART, [`C64Backend::lend_ddr`]): the cartridge serves its ROM, RAM and GeoRAM windows out of DDR here, as
+    /// it does for a real DMA read, so a peek of `$8000-$BFFF` under a CRT returns the cartridge byte the firmware
+    /// put there and not the unserved value.
+    ///
+    /// The lease is the only `&mut` the backend is given: the peek between the lend and the return-of-borrow takes
+    /// `&self` ([`C64Backend::dma_peek`]), so nothing on the C64 moves — no clock advances, no bus cycle runs and no
+    /// cartridge register is consumed. The borrow is taken back before this returns, so the backend never holds DDR
+    /// past the peek; unlike [`Self::return_ddr`] it does not refresh U64_CART_DETECT, because a peek cannot change
+    /// the cartridge lines.
+    pub fn dma_peek_ddr(&mut self, addr: u16, ram: &mut [u8]) -> u8 {
+        match &mut self.backend {
+            Some(b) => {
+                b.lend_ddr(Some(ram));
+                let val = b.dma_peek(addr);
+                b.lend_ddr(None);
+                val
+            }
+            None => self.dma.peek(addr),
+        }
     }
 
     /// Host joystick for C64 port 2, active low, ANDed with C64_JOY2_SWOUT (S14 §6).
@@ -897,6 +922,34 @@ mod tests {
         b.w8(0x1018_8001, 0xA9);
         assert_eq!(b.r8(0x1018_A123), 0x23, "ROM windows read the backend");
         assert_eq!(b.mock.take(), [Call::RomWrite(C64Rom::Basic, 1, 0xA9)], "no sync for core config and ROMs");
+    }
+
+    /// W4-CART: a peek of a cartridge ROM window is served from guest DDR (`dma_peek_ddr`), where `dma_peek` alone
+    /// reads it as not served, and the peek leaves the C64 alone — no call reaches the backend and the lease is given
+    /// back before the peek returns.
+    #[test]
+    fn dma_peek_ddr_serves_the_cart_rom_window_without_touching_the_c64() {
+        let mut b = Bench::new();
+        // The CRT byte the firmware's `C64_CRT::read_crt` put in DDR: ROML $8123 and ROMH $B456 of bank 0.
+        (b.ram[CART_ROM_DDR + 0x0123], b.ram[CART_ROM_DDR + 0x3456]) = (0xA5, 0x3C);
+        // NORMAL 16K taken by the reset line, as `start_cartridge` does (c64.cc:1154-1224).
+        b.w8(TYPE_ADDR, 0x01);
+        b.w8(MODE_ADDR, 0x04);
+        b.w8(MODE_ADDR, 0x08);
+        assert_eq!(b.mock.take(), [Call::Reset(true), Call::Cart(0x01, 0x00, 0x00, CART_ROM_SIZE), Call::Reset(false)]);
+        // Without DDR the window is not served: the mock's unserved value is the low address byte inverted.
+        let port = b.map.get::<C64Port>().unwrap();
+        assert_eq!((port.dma_peek(0x8123), port.dma_peek(0xB456)), (!0x23, !0x56), "unserved without DDR");
+        let (ram, port) = (&mut b.ram, b.map.get_mut::<C64Port>().unwrap());
+        assert_eq!(port.dma_peek_ddr(0x8123, ram), 0xA5, "ROML: the CRT byte in DDR, not the unserved value");
+        assert_eq!(port.dma_peek_ddr(0xB456, ram), 0x3C, "ROMH: the CRT byte in DDR");
+        assert_eq!(port.dma_peek_ddr(0xDC01, ram), !0x01, "outside the cart windows the bus answers as before");
+        // A peek runs nothing on the C64 and keeps no borrow: no advance, no DMA cycle, no cart register consumed.
+        assert_eq!(b.mock.take(), [], "a peek makes no call that can move the C64");
+        assert_eq!(*b.mock.ddr.borrow(), None, "the borrow is given back before the peek returns");
+        assert!(b.mock.cart_rom.borrow().is_none(), "and the backend keeps no DDR past it");
+        let mut t0 = C64Port::new();
+        assert_eq!(t0.dma_peek_ddr(0x8123, &mut b.ram), t0.dma_peek(0x8123), "T0 stub without a backend: no lease");
     }
 
     /// W4-SID: core config writes reach the backend, unsynced, and stay latched.

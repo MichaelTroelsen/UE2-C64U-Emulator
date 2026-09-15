@@ -480,7 +480,9 @@ impl C64Backend for Trx64Backend {
         }
     }
 
-    /// Without side effects; cartridge ROM and RAM read as not served, because no DDR is lent here.
+    /// Without side effects: `read_full` is TRX64's peek, and `CartProxy::peek` reaches the cartridge without
+    /// clocking it. It serves cartridge ROM and RAM from DDR while a lease is held (`C64Port::dma_peek_ddr` lends one
+    /// around the call); with no DDR lent those windows read as not served, as the rest of this backend does.
     fn dma_peek(&self, addr: u16) -> u8 {
         let io = self.m.memconfig.io;
         match self.sid.peek(addr).filter(|_| io) {
@@ -831,6 +833,29 @@ mod tests {
         c64.set_cart(0x00, &[]);
         assert!(c64.m.cartridge.is_none());
         c64.lend_ddr(None);
+    }
+
+    /// W4-CART: a peek of a cartridge ROM window is served out of DDR while a lease is held, and moves nothing on
+    /// the C64 (the counterpart of `C64Port::dma_peek_ddr`, which lends and returns around exactly this call).
+    #[test]
+    fn dma_peek_serves_the_cart_rom_window_while_ddr_is_lent() {
+        let mut c64 = Trx64Backend::new(Path::new("/nonexistent"));
+        let mut ddr = ddr();
+        c64.advance_to(0);
+        c64.lend_ddr(Some(&mut ddr));
+        c64.set_reset(true);
+        // NORMAL 16K: ROML bank 0 reads 0x40, ROMH bank 0 reads 0x80 (cart::tests::ddr).
+        c64.set_cart(0x01, &[]);
+        c64.set_reset(false);
+        let (clk, pc) = (c64.m.c64_core.clk, c64.m.c64_core.reg_pc);
+        assert_eq!((c64.dma_peek(0x8123), c64.dma_peek(0xB456)), (0x40, 0x80), "ROML and ROMH from DDR");
+        assert_eq!((c64.m.c64_core.clk, c64.m.c64_core.reg_pc), (clk, pc), "a peek runs no cycle");
+        c64.lend_ddr(None);
+        assert_eq!(
+            (c64.dma_peek(0x8123), c64.dma_peek(0xB456)),
+            (c64.m.ram[0x8123], c64.m.ram[0xB456]),
+            "not served once the borrow is back: the gap dma_peek_ddr closes"
+        );
     }
 
     /// A C64 without ROMs running `code` at $C000 from RAM, with cartridge `type_variant` configured by a reset.
