@@ -122,6 +122,29 @@ pub enum CartRequest {
 /// Receives the result lines of a [`CartRequest`], or the reason it failed.
 pub type CartDone = Sender<std::result::Result<Vec<String>, String>>;
 
+/// Remove hidden `.<name>.tmp-<pid>` files left beside `path` by a run that was killed between creating that
+/// temporary file (see [`write_crt`]) and renaming it over the target (docs/status/cart-slot.md, Limits). Matches
+/// only that exact name for `path`'s own file name, and only regular files, so neither the CRT itself nor its
+/// `.bak` (nor an unrelated file that merely starts or ends similarly) is ever at risk; follows the shape of
+/// `ue2_vfat::sync::remove_stale_temps`.
+fn sweep_stale_temps(path: &Path) {
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else { return };
+    let Some(dir) = path.parent() else { return };
+    let Ok(entries) = fs::read_dir(dir) else { return };
+    let prefix = format!(".{name}.tmp-");
+    for entry in entries.flatten() {
+        let Ok(file_type) = entry.file_type() else { continue };
+        if !file_type.is_file() {
+            continue;
+        }
+        let Some(entry_name) = entry.file_name().to_str().map(str::to_owned) else { continue };
+        let Some(pid) = entry_name.strip_prefix(&prefix) else { continue };
+        if !pid.is_empty() && pid.bytes().all(|b| b.is_ascii_digit()) {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
+}
+
 /// Write `bytes` to `path` through a temporary file in the same directory, renamed over the target. With `keep_bak`
 /// an existing target is copied to `<path>.bak` first.
 pub fn write_crt(path: &Path, bytes: &[u8], keep_bak: bool) -> Result<()> {
@@ -156,6 +179,11 @@ pub struct CartSlot {
 
 impl CartSlot {
     pub fn new(spec: Option<CartSlotSpec>, machine: &mut Machine) -> CartSlot {
+        if let Some(s) = &spec {
+            if s.persist == Persist::WriteBack {
+                sweep_stale_temps(&s.path);
+            }
+        }
         let generation = machine.c64_cart_slot().map_or(0, |s| s.generation());
         CartSlot { spec, saved: generation, seen: generation, changed_ms: 0, bak_done: false }
     }
@@ -316,6 +344,37 @@ mod tests {
         let names: Vec<_> = fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name()).collect();
         assert_eq!(names.len(), 2, "no temporary file left: {names:?}");
         assert!(write_crt(&dir.join("missing/x.crt"), b"x", false).is_err());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn sweep_stale_temps_removes_only_the_exact_hidden_temp_name() {
+        let dir = std::env::temp_dir().join(format!("ue2-cartslot-sweep-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("game.crt");
+        fs::write(&path, b"crt").unwrap();
+        let bak = dir.join("game.crt.bak");
+        fs::write(&bak, b"bak").unwrap();
+        // Left behind by a run SIGKILLed between creating it and the rename in write_crt.
+        let stale = dir.join(".game.crt.tmp-424242");
+        fs::write(&stale, b"stale").unwrap();
+        // Must not match: a different target's stale temp, and a directory that merely looks like one.
+        let other = dir.join(".other.crt.tmp-1");
+        fs::write(&other, b"keep").unwrap();
+        let not_a_pid = dir.join(".game.crt.tmp-abc");
+        fs::write(&not_a_pid, b"keep").unwrap();
+        // A directory matching the exact name pattern is not a "regular file" and must survive.
+        let matching_dir = dir.join(".game.crt.tmp-7");
+        fs::create_dir(&matching_dir).unwrap();
+
+        sweep_stale_temps(&path);
+
+        assert!(!stale.exists(), "stale temp file removed: {stale:?}");
+        assert!(other.exists(), "a different target's temp file must survive");
+        assert!(not_a_pid.exists(), "a name whose suffix is not all digits must survive");
+        assert!(matching_dir.is_dir(), "a directory with a matching name must survive: {matching_dir:?}");
+        assert_eq!(fs::read(&path).unwrap(), b"crt", "sweep must print/prove it left the CRT untouched: {path:?}");
+        assert_eq!(fs::read(&bak).unwrap(), b"bak", "sweep must leave the .bak untouched: {bak:?}");
         fs::remove_dir_all(&dir).unwrap();
     }
 }
