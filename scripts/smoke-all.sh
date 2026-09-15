@@ -78,9 +78,9 @@ smoke menu "$repo/scripts/smoke-menu.ctl" --flash run/flash.bin
 if [[ ${UE2_SD_IMAGE_SCRIPT:-py} == sh ]]; then
     "$repo/scripts/make-sd-image.sh" run/sd.img
 else
-    # Through the interpreter, not the shebang: make-sd-image.py is mode 100644 in the index, so a clean
-    # checkout cannot execute it directly. make-sd-image.py runs ue2-mkimage with cwd=$repo, so the image
-    # path must be absolute here or it would land under $repo/run instead of this run directory's run/.
+    # Through $UE2_PYTHON rather than the shebang, so a caller can name an interpreter and an export or a
+    # checkout that lost the mode bit still works. make-sd-image.py runs ue2-mkimage with cwd=$repo, so
+    # the image path must be absolute here or it would land under $repo/run instead of this run's run/.
     "${UE2_PYTHON:-python3}" "$repo/scripts/make-sd-image.py" "$PWD/run/sd.img"
 fi
 smoke sd "$repo/scripts/smoke-sd.ctl" --flash run/flash.bin --sd run/sd.img
