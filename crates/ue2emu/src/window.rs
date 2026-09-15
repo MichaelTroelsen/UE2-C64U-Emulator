@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::num::NonZeroU32;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
@@ -62,12 +62,18 @@ pub fn run_window(cfg: MachineConfig, opts: RunOptions) -> Result<()> {
             return Err(e);
         }
     }
+    // A failing script has to reach the process exit code, not just stderr: headless already exits non-zero
+    // through `run_headless`, and the window used to swallow it (docs/status/tooling.md §Known gaps). The
+    // thread hands the error back here and `run_window` returns it once the window has closed.
+    let script_error: Arc<Mutex<Option<anyhow::Error>>> = Arc::new(Mutex::new(None));
     if let Some(path) = opts.script.clone() {
         let script_ctl = ctl.clone();
+        let failed = Arc::clone(&script_error);
         std::thread::Builder::new().name("ue2-script".into()).spawn(move || {
             // End of file keeps the window open for interactive use; `quit` stops the emulator itself.
             if let Err(e) = control::run_script(&script_ctl, &path) {
                 eprintln!("{e:#}");
+                *failed.lock().expect("script error slot") = Some(e);
                 let _ = script_ctl.commands.send(Command::Quit);
             }
         })?;
@@ -104,6 +110,9 @@ pub fn run_window(cfg: MachineConfig, opts: RunOptions) -> Result<()> {
     );
     looped.context("window: event loop")?;
     if let Some(e) = window_error {
+        return Err(e);
+    }
+    if let Some(e) = script_error.lock().expect("script error slot").take() {
         return Err(e);
     }
     emulation
